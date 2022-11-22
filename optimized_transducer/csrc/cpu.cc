@@ -156,8 +156,8 @@ static torch::Tensor ComputeLogProbsForLogSoftmax(
 
 /**
    Return two tensors:
-    - alpha, a tensor of shape (log_probs.size(0),)
-    - total_scores, a tensor of shape (logit_lengths.size(0),)
+    - alpha, a tensor of shape (log_probs.size(0),)=(sum_all_TU,)
+    - total_scores, a tensor of shape (logit_lengths.size(0),)=(B,)
  */
 static std::pair<torch::Tensor, torch::Tensor> ComputeAlpha(
     const torch::Tensor &log_probs, const torch::Tensor &logit_lengths,
@@ -181,9 +181,10 @@ static std::pair<torch::Tensor, torch::Tensor> ComputeAlpha(
     int32_t T = logit_len_arr[b];
 
     // p1 means plus one
-    // We need to plus one since it is prepended with a blank
+    // We need to plus one since label prepended with a blank
     int32_t U_p1 = target_len_arr[b] + 1;
 
+    // alpha(0, 0) = 0
     p_alpha[0] = 0;
     float *p_alpha_tm1 = p_alpha;  // tm1 means t minus 1
     float *p_alpha_t = p_alpha_tm1 + U_p1;
@@ -265,7 +266,7 @@ static std::pair<torch::Tensor, torch::Tensor> ComputeAlphaOneSymPerFrame(
     int32_t T = logit_len_arr[b];
 
     // p1 means plus one
-    // We need to plus one since it is prepended with a blank
+    // We need to plus one since it is prepended with a blank.
     int32_t U_p1 = target_len_arr[b] + 1;
 
     // alpha(0, 0) = 0
@@ -293,8 +294,11 @@ static std::pair<torch::Tensor, torch::Tensor> ComputeAlphaOneSymPerFrame(
 
       for (int32_t u = 1; u != U_p1; ++u) {
         if (u > t || t - u > diff) {
+          // u > t left-up not compute
+          // t - u > diff right-bottom not compute
           continue;
         } else if (t == u) {
+          // diagonal, has only one path
           // alpha(t, u) = alpha(t-1, u-1) + log_probs(t-1, u-1).symbol
           p_alpha_t[u] =
               p_alpha_tm1[u - 1] + (p_log_probs_tm1 + (u - 1) * 2)[kSymCol];
@@ -338,34 +342,37 @@ static std::pair<torch::Tensor, torch::Tensor> ComputeBeta(
     // p1 means plus one
     // We need to plus one since it is prepended with a blank
     int32_t U_p1 = target_len_arr[b] + 1;
+
     float *p_beta_t = p_beta + T * U_p1;
     const float *p_log_probs_t = p_log_probs + T * U_p1 * 2;
+    // beta(T-1, U_p1-1)
     p_beta_t[-1] = (p_log_probs_t - 2)[kBlankCol];
 
     // when u = U_p1 - 1,
     // beta(t, U_p1-1) = beta(t+1, U_p1-1) + lop_probs(t, U_p1-1).blank
     for (int32_t t = T - 2; t >= 0; --t) {
-      p_beta_t = p_beta + (t + 1) * U_p1 - 1;
-      float *p_beta_t_p1 = p_beta_t + U_p1;
-      p_log_probs_t = p_log_probs + (t + 1) * U_p1 * 2 - 2;
-
+      p_beta_t = p_beta + (t + 1) * U_p1 - 1; // T -2
+      float *p_beta_t_p1 = p_beta_t + U_p1; // T - 1
+      p_log_probs_t = p_log_probs + (t + 1) * U_p1 * 2 - 2; // T - 2
+ 
       *p_beta_t = *p_beta_t_p1 + p_log_probs_t[kBlankCol];
     }
+
     // when t = T - 1,
     // beta(T-1 u) =  beta(T-1, u+1) + log_probs(T-1, u).symbol
-    float *p_beta_u_p1 = p_beta + T * U_p1 - 1;
-    float *p_beta_u = p_beta_u_p1 - 1;
-    const float *p_log_probs_u = p_log_probs + T * U_p1 * 2 - 4;
-
+    float *p_beta_u_p1 = p_beta + T * U_p1 - 1; // T - 1, U_p1 - 1
+    float *p_beta_u = p_beta_u_p1 - 1; // T -1, U_p1 - 2
+    const float *p_log_probs_u = p_log_probs + T * U_p1 * 2 - 4; // T - 1, U_p1 - 2
     for (int32_t u = U_p1 - 2; u >= 0;
          --u, --p_beta_u, --p_beta_u_p1, p_log_probs_u -= 2) {
       *p_beta_u = *p_beta_u_p1 + p_log_probs_u[kSymCol];
     }
 
+    // t = T - 1 ~ 0, u = u_p1 - 2 ~ 0
     for (int32_t t = T - 2; t >= 0; --t) {
-      p_beta_t = p_beta + t * U_p1;
-      float *p_beta_t_p1 = p_beta_t + U_p1;
-      p_log_probs_t = p_log_probs + (t + 1) * U_p1 * 2 - 4;
+      p_beta_t = p_beta + t * U_p1; // T - 2
+      float *p_beta_t_p1 = p_beta_t + U_p1; // T -1
+      p_log_probs_t = p_log_probs + (t + 1) * U_p1 * 2 - 4; // T - 1, U_p1 - 2
       for (int32_t u = U_p1 - 2; u >= 0; --u, p_log_probs_t -= 2) {
         // beta(t, u) = log_sum_exp(beta(t+1,u) + log_probs(t, u).blank,
         //                           beta(t, u+1) + log_probs(t, u).symbol)
@@ -413,7 +420,7 @@ static std::pair<torch::Tensor, torch::Tensor> ComputeBetaOneSymPerFrame(
 
     float *p_beta_t_p1;
 
-    // u = U_p1 - 1
+    // u = U_p1 - 1, top-left corner
     for (int32_t t = T - 2; t >= U_p1 - 1; --t) {
       // beta(t, U_p1-1) = beta(t+1, U_p1-1) + log_probs(t, U_p1-1).blank
       p_beta_t = p_beta + t * U_p1;
@@ -422,14 +429,17 @@ static std::pair<torch::Tensor, torch::Tensor> ComputeBetaOneSymPerFrame(
       p_beta_t[U_p1 - 1] =
           p_beta_t_p1[U_p1 - 1] + (p_log_probs_t + (U_p1 - 1) * 2)[kBlankCol];
     }
+
     for (int32_t t = T - 2; t >= 0; --t) {
       p_beta_t = p_beta + t * U_p1;
       p_beta_t_p1 = p_beta + (t + 1) * U_p1;
       p_log_probs_t = p_log_probs + t * U_p1 * 2;
       for (int32_t u = U_p1 - 2; u >= 0; --u) {
         if (u > t || t - u > diff) {
+          // right-botoom conrner
           continue;
         } else if (t - u == diff) {
+          // digonal has only one path
           // beta(t, u) = beta(t+1, u+1) + log_probs(t, u).symbol
           p_beta_t[u] = p_beta_t_p1[u + 1] + (p_log_probs_t + u * 2)[kSymCol];
         } else {
@@ -449,6 +459,7 @@ static std::pair<torch::Tensor, torch::Tensor> ComputeBetaOneSymPerFrame(
   }
   return {beta, total_scores};
 }
+
 /**
    @param logits The output of `nn.Linear` with shape (sum_all_TU, vocab_size)
    @param logit_lengths A 1-D tensor of shape (batch_size,)
@@ -497,6 +508,7 @@ static void ComputeGradient(
     // We need to plus one since it is prepended with a blank
     int32_t U_p1 = target_len_arr[b] + 1;
 
+    // nll loss
     float loss = -p_beta[0];
 
     for (int32_t t = 0; t != T;
@@ -512,7 +524,7 @@ static void ComputeGradient(
           float g = p_logits[v] + c;
 
           if (v == blank && t == T - 1 && u == U_p1 - 1) {
-            // the last blank transition
+            // the last blank transition, gradient is one
             p_grad[v] = std::exp(g + p_beta[u]) - std::exp(g);
           } else if (v == blank && t < T - 1) {
             p_grad[v] = std::exp(g + p_beta[u]) - std::exp(g + p_beta_t_p1[u]);
@@ -588,18 +600,23 @@ static void ComputeGradientOneSymPerFrame(
         int32_t target_u =
             (u < U_p1 - 1) ? p_targets[u] : -1;  // -1 is not used
         float c = p_alpha_t[u] + loss - p_den_t[u];
+
         for (int32_t v = 0; v != V; ++v) {
           float g = p_logits[v] + c;
+
           if (v == blank && t == T - 1 && u == U_p1 - 1) {
-            // the last blank transition
+            // the last blank transition, prob/gradient is one
             p_grad[v] = std::exp(g + p_beta_t[u]) - std::exp(g);
           } else if (v == blank && t - u < diff) {
+            // blank
             p_grad[v] =
                 std::exp(g + p_beta_t[u]) - std::exp(g + p_beta_t_p1[u]);
           } else if (u < U_p1 - 1 && v == target_u) {
+            // target symbol
             p_grad[v] =
                 std::exp(g + p_beta_t[u]) - std::exp(g + p_beta_t_p1[u + 1]);
           } else {
+            // other symbol
             p_grad[v] = std::exp(g + p_beta_t[u]);
           }
         }  // end v
@@ -610,6 +627,7 @@ static void ComputeGradientOneSymPerFrame(
     p_den += T * U_p1;
   }  // end b
 }
+
 /**
    @param logits The output of log-softmax with shape (sum_all_TU, vocab_size)
    @param logit_lengths A 1-D tensor of shape (batch_size,)
@@ -730,6 +748,7 @@ static void ComputeGradientForLogSoftmaxOneSymPerFrame(
             (u < U_p1 - 1) ? p_targets[u] : -1;  // -1 is not used
         float c = p_alpha_t[u] + loss;
 
+        // gradient is Loss w.r.t Softmax
         for (int32_t v = 0; v != V; ++v) {
           float g = p_logits[v] + c;
           if (v == blank && t == T - 1 && u == U_p1 - 1) {
