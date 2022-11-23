@@ -37,13 +37,14 @@ __global__ void ComputeLogProbs(const float *logits, const float *denominator,
   int32_t idx01 = blockDim.x * blockIdx.x + threadIdx.x;
   if (idx01 >= sum_all_TU) return;  // out-of-boundary
 
-  int32_t b = row_ids[idx01];  // batch size
+  int32_t b = row_ids[idx01];  // batch index
 
   // +1 since it is prepended with a blank
   int32_t U_p1 = target_lengths[b] + 1;
   int32_t offset = row_splits[b];
+  // offset in `b` batch, left is negtive, right is postive
   int32_t idx1 = idx01 - offset;
-
+  // map threadIdx into [0, U_p1-1].
   int32_t u = idx1 % U_p1;
 
   const float *p_logits = logits + idx01 * vocab_size;
@@ -67,7 +68,7 @@ __global__ void ComputeLogProbsForLogSoftmax(
   int32_t idx01 = blockDim.x * blockIdx.x + threadIdx.x;
   if (idx01 >= sum_all_TU) return;  // out-of-boundary
 
-  int32_t b = row_ids[idx01];  // batch size
+  int32_t b = row_ids[idx01];  // batch index
 
   // +1 since it is prepended with a blank
   int32_t U_p1 = target_lengths[b] + 1;
@@ -288,6 +289,7 @@ __global__ void ComputeAlphaOneSymPerFrame(
         }
       } else if (u < U_p1) {
         if (t == u) {
+          // diagonal
           // alpha(t, u) = alpha(t-1, u-1) + log_probs(t-1, u-1).symbol
           p_alpha_t[u] =
               p_alpha_t_m1[u - 1] + (p_log_probs_t_m1 + (u - 1) * 2)[kSymCol];
@@ -528,7 +530,7 @@ __global__ void ComputeGradient(
   int32_t idx01 = blockDim.x * blockIdx.x + threadIdx.x;
   if (idx01 >= sum_all_TU) return;  // out-of-boundary
 
-  int32_t b = row_ids[idx01];  // batch size
+  int32_t b = row_ids[idx01];  // batch index
 
   // +1 since it is prepended with a blank
   int32_t U_p1 = target_lengths[b] + 1;
@@ -553,6 +555,7 @@ __global__ void ComputeGradient(
 
   float *p_grad_t_u = gradient + idx01 * vocab_size;
 
+  // nll
   float loss = -1 * p_beta[0];
 
   if (isinf(loss) || isnan(loss)) {
@@ -595,7 +598,7 @@ __global__ void ComputeGradientOneSymPerFrame(
   int32_t idx01 = blockDim.x * blockIdx.x + threadIdx.x;
   if (idx01 >= sum_all_TU) return;  // out-of-boundary
 
-  int32_t b = row_ids[idx01];  // batch size
+  int32_t b = row_ids[idx01];  // batch index
 
   // +1 since it is prepended with a blank
   int32_t U_p1 = target_lengths[b] + 1;
@@ -619,6 +622,7 @@ __global__ void ComputeGradientOneSymPerFrame(
   const float *p_beta_t_p1 = p_beta + (t + 1) * U_p1;
 
   float *p_grad_t_u = gradient + idx01 * vocab_size;
+  // nll
   float loss = -1 * p_beta[0];
   int32_t diff = T - 1 - (U_p1 - 1);
 
@@ -659,7 +663,7 @@ __global__ void ComputeGradientForLogSoftmax(
   int32_t idx01 = blockDim.x * blockIdx.x + threadIdx.x;
   if (idx01 >= sum_all_TU) return;  // out-of-boundary
 
-  int32_t b = row_ids[idx01];  // batch size
+  int32_t b = row_ids[idx01];  // batch index
 
   // +1 since it is prepended with a blank
   int32_t U_p1 = target_lengths[b] + 1;
@@ -682,6 +686,7 @@ __global__ void ComputeGradientForLogSoftmax(
 
   float *p_grad_t_u = gradient + idx01 * vocab_size;
 
+  // nll
   float loss = -1 * p_beta[0];
 
   if (isinf(loss) || isnan(loss)) {
